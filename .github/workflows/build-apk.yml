@@ -1,4 +1,4 @@
-name: build-apk
+name: Build Android APK
 
 on:
   push:
@@ -9,77 +9,131 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+
+env:
+  # Android SDK location used by the workflow steps
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  # configure Gradle memory and Kotlin daemon (can be adjusted)
+  ORG_GRADLE_JVMARGS: -Xmx4g -Dkotlin.daemon.jvm.options="-Xmx2g" -Dfile.encoding=UTF-8
+  _JAVA_OPTIONS: -Xmx4g
 
 jobs:
   build-apk:
+    name: Build debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
-    env:
-      # Use repo workspace subfolders (safe & cacheable)
-      GRADLE_USER_HOME: ${{ github.workspace }}/.cache/gradle
-      PUB_CACHE: ${{ github.workspace }}/.cache/pub
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      # Increase Gradle/JVM memory to avoid OOM/jlink crashes
-      ORG_GRADLE_JVMARGS: -Xmx4g -Dkotlin.daemon.jvm.options="-Xmx2g" -Dfile.encoding=UTF-8
-      _JAVA_OPTIONS: -Xmx4g
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Cache Flutter pub & Gradle
-        uses: actions/cache@v4
         with:
-          path: |
-            .cache/pub
-            .cache/gradle
-          key: ${{ runner.os }}-flutter-deps-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-deps-
+          fetch-depth: 0
 
-      - name: Setup Java 17 (avoid jlink quirks from Java 21)
+      - name: Set up Java (Temurin 17)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: 'gradle'
+          cache: gradle
 
-      - name: Setup Flutter (pinned)
+      - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
-          flutter-version: 3.24.3
-          cache: true
+          flutter-version: '3.24.3'   # explicit stable version matching local dev
 
-      - name: Ensure Android SDK tools are installed
+      - name: Ensure Android SDK cmdline-tools & packages are installed
+        id: android_sdk
         run: |
-          sudo mkdir -p /usr/local/lib/android
-          sudo chown -R $USER:$USER /usr/local/lib/android
-          # Accept licenses and install minimal required packages
-          yes | sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --licenses || true
-          sdkmanager --sdk_root=${ANDROID_SDK_ROOT} "platform-tools" "platforms;android-34" "build-tools;34.0.0" "cmdline-tools;latest"
+          set -euo pipefail
 
-      - name: Show environment & versions (debug)
-        run: |
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-          flutter --version
-          java -version
-          echo "GRADLE_USER_HOME=$GRADLE_USER_HOME"
 
-      - name: Flutter pub get
-        env:
-          PUB_CACHE: ${{ github.workspace }}/.cache/pub
-        run: flutter pub get
+          # create sdk dir and give ownership to runner user
+          sudo mkdir -p "${ANDROID_SDK_ROOT}"
+          sudo chown -R $USER:$USER "${ANDROID_SDK_ROOT}"
 
-      - name: Build debug APK (no shrink for reliability)
-        env:
-          GRADLE_USER_HOME: ${{ github.workspace }}/.cache/gradle
-          PUB_CACHE: ${{ github.workspace }}/.cache/pub
+          TMP_ZIP="/tmp/cmdline-tools.zip"
+          CMDLINE_DIR="${ANDROID_SDK_ROOT}/cmdline-tools"
+          LATEST_DIR="${CMDLINE_DIR}/latest"
+
+          if [ ! -d "${LATEST_DIR}" ]; then
+            echo "Downloading Android command line tools..."
+            # If this URL changes in future, update it. This is a known stable URL pattern from Google.
+            wget -q -O "$TMP_ZIP" "https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip"
+            mkdir -p "$CMDLINE_DIR"
+            unzip -q "$TMP_ZIP" -d "$CMDLINE_DIR"
+            # move to 'latest' folder expected by sdkmanager tools
+            mv "${CMDLINE_DIR}/cmdline-tools" "${LATEST_DIR}"
+            rm -f "$TMP_ZIP"
+          else
+            echo "cmdline-tools already present at $LATEST_DIR"
+          fi
+
+          # Add sdkmanager and platform-tools to PATH for later steps
+          echo "PATH=${LATEST_DIR}/bin:${ANDROID_SDK_ROOT}/platform-tools:${PATH}" >> $GITHUB_ENV
+          export PATH="${LATEST_DIR}/bin:${ANDROID_SDK_ROOT}/platform-tools:${PATH}"
+
+          # Accept licenses non-interactively and install required packages
+          yes | sdkmanager --sdk_root="${ANDROID_SDK_ROOT}" --licenses || true
+
+          sdkmanager --sdk_root="${ANDROID_SDK_ROOT}" --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" || true
+
+          # show installed packages briefly
+          sdkmanager --sdk_root="${ANDROID_SDK_ROOT}" --list | sed -n '1,120p'
+
+        shell: bash
+
+      - name: Verify Android & Flutter environment
         run: |
-          flutter clean || true
-          flutter build apk --debug --no-shrink --verbose
-        timeout-minutes: 40
+          echo "Which flutter: $(which flutter || true)"
+          flutter --version
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "Android SDK root = $ANDROID_SDK_ROOT"
+          sdkmanager --version || true
+          adb --version || true
+        shell: bash
+
+      - name: Enable Android SDK & Gradle caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ${{ env.HOME }}/.pub-cache
+          key: gradle-cache-${{ runner.os }}-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: |
+            gradle-cache-${{ runner.os }}-
+
+      - name: Run flutter pub get
+        run: flutter pub get
+        shell: bash
+
+      - name: Build APK (debug)
+        run: |
+          set -euo pipefail
+          # Ensure Flutter sees Android SDK root as env
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}"
+          # optional: increase verbosity by adding --verbose if you want logs
+          flutter build apk --debug --no-shrink
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        shell: bash
+
+      - name: Collect APK
+        run: |
+          ls -la build/app/outputs/flutter-apk || true
+          if [ -f build/app/outputs/flutter-apk/app-debug.apk ]; then
+            echo "APK found: build/app/outputs/flutter-apk/app-debug.apk"
+          else
+            echo "APK not found; printing last 200 lines of build log (if available)"
+            tail -n 200 /home/runner/.cache/flutter-*/flutter_* 2>/dev/null || true
+            exit 1
+          fi
+        shell: bash
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
