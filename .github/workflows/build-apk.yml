@@ -10,19 +10,19 @@ on:
 permissions:
   contents: read
 
-env:
-  # Keep Gradle and Flutter caches under GITHUB_WORKSPACE to allow caching & avoid /root/.gradle interference
-  GRADLE_USER_HOME: ${{ runner.temp }}/.gradle
-  PUB_CACHE: ${{ runner.temp }}/.pub-cache
-  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-  # Increase Gradle/JVM memory to avoid OOM/jlink crashes
-  ORG_GRADLE_JVMARGS: -Xmx4g -Dkotlin.daemon.jvm.options="-Xmx2g" -Dfile.encoding=UTF-8
-  _JAVA_OPTIONS: -Xmx4g
-
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
+    env:
+      # Use repo workspace subfolders (safe & cacheable)
+      GRADLE_USER_HOME: ${{ github.workspace }}/.cache/gradle
+      PUB_CACHE: ${{ github.workspace }}/.cache/pub
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      # Increase Gradle/JVM memory to avoid OOM/jlink crashes
+      ORG_GRADLE_JVMARGS: -Xmx4g -Dkotlin.daemon.jvm.options="-Xmx2g" -Dfile.encoding=UTF-8
+      _JAVA_OPTIONS: -Xmx4g
 
     steps:
       - name: Checkout repo
@@ -32,8 +32,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ${{ env.PUB_CACHE }}
-            ${{ env.GRADLE_USER_HOME }}
+            .cache/pub
+            .cache/gradle
           key: ${{ runner.os }}-flutter-deps-${{ hashFiles('**/pubspec.lock') }}
           restore-keys: |
             ${{ runner.os }}-flutter-deps-
@@ -56,7 +56,7 @@ jobs:
         run: |
           sudo mkdir -p /usr/local/lib/android
           sudo chown -R $USER:$USER /usr/local/lib/android
-          # On GitHub runners Android SDK is present; but ensure required components and licenses:
+          # Accept licenses and install minimal required packages
           yes | sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --licenses || true
           sdkmanager --sdk_root=${ANDROID_SDK_ROOT} "platform-tools" "platforms;android-34" "build-tools;34.0.0" "cmdline-tools;latest"
 
@@ -68,11 +68,14 @@ jobs:
           echo "GRADLE_USER_HOME=$GRADLE_USER_HOME"
 
       - name: Flutter pub get
-        run: flutter pub get
         env:
-          PUB_CACHE: ${{ env.PUB_CACHE }}
+          PUB_CACHE: ${{ github.workspace }}/.cache/pub
+        run: flutter pub get
 
       - name: Build debug APK (no shrink for reliability)
+        env:
+          GRADLE_USER_HOME: ${{ github.workspace }}/.cache/gradle
+          PUB_CACHE: ${{ github.workspace }}/.cache/pub
         run: |
           flutter clean || true
           flutter build apk --debug --no-shrink --verbose
