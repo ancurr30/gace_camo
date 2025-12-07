@@ -2,59 +2,81 @@ name: build-apk
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  # Keep Gradle and Flutter caches under GITHUB_WORKSPACE to allow caching & avoid /root/.gradle interference
+  GRADLE_USER_HOME: ${{ runner.temp }}/.gradle
+  PUB_CACHE: ${{ runner.temp }}/.pub-cache
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  # Increase Gradle/JVM memory to avoid OOM/jlink crashes
+  ORG_GRADLE_JVMARGS: -Xmx4g -Dkotlin.daemon.jvm.options="-Xmx2g" -Dfile.encoding=UTF-8
+  _JAVA_OPTIONS: -Xmx4g
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Install Flutter (use explicit flutter-version to avoid ambiguity)
-      - name: Setup Flutter
+      - name: Cache Flutter pub & Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.PUB_CACHE }}
+            ${{ env.GRADLE_USER_HOME }}
+          key: ${{ runner.os }}-flutter-deps-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-deps-
+
+      - name: Setup Java 17 (avoid jlink quirks from Java 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Flutter (pinned)
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.24.3    # <- pin a concrete Flutter release (change if you prefer)
+          flutter-version: 3.24.3
           cache: true
 
-      # Ensure a matching JDK for Android build
-      - name: Setup Java (required by Gradle / Android toolchain)
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-
-      - name: Show versions (debug)
+      - name: Ensure Android SDK tools are installed
         run: |
+          sudo mkdir -p /usr/local/lib/android
+          sudo chown -R $USER:$USER /usr/local/lib/android
+          # On GitHub runners Android SDK is present; but ensure required components and licenses:
+          yes | sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --licenses || true
+          sdkmanager --sdk_root=${ANDROID_SDK_ROOT} "platform-tools" "platforms;android-34" "build-tools;34.0.0" "cmdline-tools;latest"
+
+      - name: Show environment & versions (debug)
+        run: |
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
           flutter --version
           java -version
-          javac -version
-          uname -a
-
-      - name: Install Android SDK components (if needed)
-        # github runners already provide Android SDK, but this ensures cmdline-tools present
-        run: |
-          sudo yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
+          echo "GRADLE_USER_HOME=$GRADLE_USER_HOME"
 
       - name: Flutter pub get
         run: flutter pub get
+        env:
+          PUB_CACHE: ${{ env.PUB_CACHE }}
 
-      - name: Build debug APK
-        # Use --no-shrink for faster builds; remove if you want full proguard/AAB pipeline
-        run: flutter build apk --debug --no-shrink --verbose
+      - name: Build debug APK (no shrink for reliability)
+        run: |
+          flutter clean || true
+          flutter build apk --debug --no-shrink --verbose
+        timeout-minutes: 40
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
