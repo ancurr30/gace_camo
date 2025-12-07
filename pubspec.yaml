@@ -1,0 +1,26 @@
+name: gace_camo
+description: GACE camo evaluation demo app
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Core TFLite plugin (we'll add helper later if needed)
+  tflite_flutter: ^0.10.0
+  image: ^4.0.17
+  path_provider: ^2.0.11
+  image_picker: ^0.8.7+5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/model.tflite
