@@ -1,15 +1,12 @@
-
-
-
-
-
-name: Build APK
+name: build-apk
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -17,52 +14,50 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # Use subosito/flutter-action which installs flutter + Android SDK nicely
-      - name: Setup Flutter (stable) and Android SDK
+      # Install Flutter (use explicit flutter-version to avoid ambiguity)
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: stable
-          android: true
+          channel: stable
+          flutter-version: 3.24.3    # <- pin a concrete Flutter release (change if you prefer)
           cache: true
 
-      # If your Flutter project is in a subfolder (mobile/gace_camo), set working-directory below.
-      - name: Install dependencies
-        working-directory: mobile/gace_camo
+      # Ensure a matching JDK for Android build
+      - name: Setup Java (required by Gradle / Android toolchain)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Show versions (debug)
         run: |
-          flutter pub get
+          flutter --version
+          java -version
+          javac -version
+          uname -a
 
-      - name: Accept Android SDK licenses (just to be safe)
-        run: yes | flutter doctor --android-licenses
-        working-directory: mobile/gace_camo
+      - name: Install Android SDK components (if needed)
+        # github runners already provide Android SDK, but this ensures cmdline-tools present
+        run: |
+          sudo yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
 
-      - name: Show flutter doctor (info)
-        run: flutter doctor -v
-        working-directory: mobile/gace_camo
+      - name: Flutter pub get
+        run: flutter pub get
 
       - name: Build debug APK
-        working-directory: mobile/gace_camo
-        run: |
-          # build a debug APK (unsigned, no keystore needed)
-          flutter build apk --debug --no-shrink -v
-
-      - name: List APK output
-        working-directory: mobile/gace_camo
-        run: |
-          ls -la build/app/outputs/flutter-apk || true
+        # Use --no-shrink for faster builds; remove if you want full proguard/AAB pipeline
+        run: flutter build apk --debug --no-shrink --verbose
 
       - name: Upload debug APK artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gace_camo-debug-apk
-          path: mobile/gace_camo/build/app/outputs/flutter-apk/*.apk
+          name: app-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
